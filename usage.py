@@ -38,17 +38,18 @@ def main():
     # Apply thinning algorithm to df, resulting in df_thin
     resampler = ParticleResampler(df)
     df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
+    
+    # Write the reduced dataframe to a file
+    DataFrameToFile(df_thin).exclude_weights().exclude_energy().write_to_file(
+        opmd_path.with_suffix(".dat")
+    )
 
     # Visualize both dataframes in order to see effects of thining
     phase_space = PhaseSpaceVisualizer(df, label="PIC data")
     phase_space_thin = PhaseSpaceVisualizer(df_thin, label="Resampled data")
     comparative_phase_space = phase_space + phase_space_thin
-    comparative_phase_space.create_plot().savefig("plots/comparative_phase_space.png")
 
-    # Write the reduced dataframe to a file
-    DataFrameToFile(df_thin).exclude_weights().exclude_energy().write_to_file(
-        opmd_path.with_suffix(".dat")
-    )
+    comparative_phase_space.create_plot().savefig(f"{opmd_path.parent}/comparative_phase_space.png")
 
 
 if __name__ == "__main__":
