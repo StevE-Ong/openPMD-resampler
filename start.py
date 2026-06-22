@@ -25,6 +25,8 @@ def main():
                         help="If set, the phase space plot will not be created.")
     parser.add_argument("--no_csv", action="store_true",
                         help="If set, the resulting dataframe will not be saved to file.")
+    parser.add_argument("--fortran_binary", action="store_true",
+                        help="If set, write output as a Fortran unformatted binary file instead of CSV.")
 
     args = parser.parse_args()
     opmd_path = Path(args.opmd_path)
@@ -33,6 +35,7 @@ def main():
     reduction_factor = args.reduction_factor
     no_plot = args.no_plot
     no_csv = args.no_csv
+    fortran_binary = args.fortran_binary
 
     # Create the dataframe
     df = ParticleDataReader.from_file(opmd_path, particle_species_name=particle_species_name,particle_species_mass=particle_species_mass)
@@ -46,8 +49,9 @@ def main():
         phase_space_thin.create_plot().savefig("./phase_space.png")
 
     if not no_csv:
-        DataFrameToFile(df_thin).exclude_weights().exclude_energy().write_to_file(
-            opmd_path.with_suffix(".dat")
+        suffix = ".dat"
+        DataFrameToFile(df_thin).exclude_energy().write_to_file(
+            opmd_path.with_suffix(suffix), fortran_binary=fortran_binary
         )
 
 

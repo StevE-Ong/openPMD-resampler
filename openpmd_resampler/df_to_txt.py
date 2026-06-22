@@ -37,23 +37,29 @@ class DataFrameToFile:
         self.include_energy = False
         return self
 
-    def write_to_file(self, file_path):
-        # Select columns to write based on include_weights and include_energy
+    def write_to_file(self, file_path, fortran_binary=False):
         columns_to_write = self.df.columns.tolist()
         if not self.include_weights:
             columns_to_write.remove("weights")
         if not self.include_energy:
             columns_to_write.remove("kinetic_energy_mev")
 
-        # Write header to file
+        logger.info("Writing dataframe to file. This may take a while...\n")
+        if fortran_binary:
+            self._write_fortran_unformatted(file_path, columns_to_write)
+        else:
+            self._write_csv(file_path, columns_to_write)
+        logger.info("Wrote %s\n", file_path)
+
+        file_size = os.path.getsize(file_path)
+        logger.info("Final file size: %s\n", format_file_size(file_size))
+
+    def _write_csv(self, file_path, columns_to_write):
         with open(file_path, "w", encoding="utf-8") as f:
             header = ", ".join(
                 f"{column} ({self.units[column]})" for column in columns_to_write
             )
             f.write(header + "\n")
-
-        # Append DataFrame to file
-        logger.info("Writing dataframe to file. This may take a while...\n")
         self.df.to_csv(
             file_path,
             columns=columns_to_write,
@@ -63,8 +69,12 @@ class DataFrameToFile:
             float_format="%.7e",
             mode="a",
         )
-        logger.info("Wrote %s\n", file_path)
 
-        # Compute and log the file size
-        file_size = os.path.getsize(file_path)
-        logger.info("Final file size: %s\n", format_file_size(file_size))
+    def _write_fortran_unformatted(self, file_path, columns_to_write):
+        import numpy as np
+        from scipy.io import FortranFile
+
+        with FortranFile(file_path, "w") as f:
+            f.write_record(np.array([len(self.df)], dtype=np.int32))
+            for col in columns_to_write:
+                f.write_record(self.df[col].to_numpy().astype(np.float32))

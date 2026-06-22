@@ -23,6 +23,8 @@ def main():
                         help="The 'k' level for global leveling thinning (default: 2.0)")
     parser.add_argument("--no_plot", action="store_true",
                         help="If set, the phase space plot will not be created.")
+    parser.add_argument("--fortran_binary", action="store_true",
+                        help="If set, write output as a Fortran unformatted binary file instead of CSV.")
     parser.add_argument("--no_csv", action="store_true",
                         help="If set, the resulting dataframe will not be saved to file.")
 
@@ -31,6 +33,7 @@ def main():
     particle_species_name = args.species
     particle_species_mass = args.mass
     reduction_factor = args.reduction_factor
+    fortran_binary = args.fortran_binary
 
     # Create the dataframe
     df = ParticleDataReader.from_file(opmd_path, particle_species_name=particle_species_name, particle_species_mass=particle_species_mass)
@@ -40,8 +43,9 @@ def main():
     df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
     
     # Write the reduced dataframe to a file
-    DataFrameToFile(df_thin).exclude_weights().exclude_energy().write_to_file(
-        opmd_path.with_suffix(".dat")
+    suffix = ".dat"
+    DataFrameToFile(df_thin).exclude_energy().write_to_file(
+        opmd_path.with_suffix(suffix), fortran_binary=fortran_binary
     )
 
     # Visualize both dataframes in order to see effects of thining
