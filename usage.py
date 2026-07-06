@@ -40,7 +40,7 @@ def main():
 
     # Apply thinning algorithm to df, resulting in df_thin
     resampler = ParticleResampler(df)
-    df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
+    df_thin = resampler.global_leveling_thinning(k=reduction_factor).finalize()
     
     # Write the reduced dataframe to a file
     suffix = ".dat"

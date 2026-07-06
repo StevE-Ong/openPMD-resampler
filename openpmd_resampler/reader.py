@@ -164,7 +164,7 @@ class OpenPMDLoader:
 
     def get_column_name_mappings(self):
         new_column_suffixes = {
-            Attributes.POSITION.value: "um",
+            Attributes.POSITION.value: "m",
             Attributes.MOMENTUM.value: "mev_c",
         }
         column_name_mappings = {}
