@@ -19,8 +19,22 @@ def main():
                         help="Particle species name (default: e_all)")
     parser.add_argument("--mass", "-m", type=float, default=1.0,
                         help="Particle mass relative to the electron mass (default: 1.0)")
+    parser.add_argument("--algorithm", "-a", type=str, default="thinning",
+                        choices=["thinning", "vranic"],
+                        help="Resampling algorithm: global leveling thinning or Vranic merging (default: thinning)")
     parser.add_argument("--reduction_factor", "-k", type=float, default=2.0,
                         help="The 'k' level for global leveling thinning (default: 2.0)")
+    parser.add_argument("--spatial_bins", type=int, nargs=3, default=[16, 16, 16],
+                        metavar=("NX", "NY", "NZ"),
+                        help="Vranic merging: number of spatial bins (default: 16 16 16)")
+    parser.add_argument("--momentum_bins", type=int, nargs=3, default=[16, 16, 16],
+                        metavar=("NP", "NTHETA", "NPHI"),
+                        help="Vranic merging: number of momentum bins (default: 16 16 16)")
+    parser.add_argument("--momentum_coordinates", type=str, default="spherical",
+                        choices=["spherical", "cartesian"],
+                        help="Vranic merging: momentum space coordinates (default: spherical)")
+    parser.add_argument("--log_scale", action="store_true",
+                        help="Vranic merging: bin the momentum norm logarithmically.")
     parser.add_argument("--no_plot", action="store_true",
                         help="If set, the phase space plot will not be created.")
     parser.add_argument("--no_csv", action="store_true",
@@ -40,9 +54,18 @@ def main():
     # Create the dataframe
     df = ParticleDataReader.from_file(opmd_path, particle_species_name=particle_species_name,particle_species_mass=particle_species_mass)
 
-    # Apply thinning algorithm to df, resulting in df_thin
-    resampler = ParticleResampler(df)
-    df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
+    # Apply the resampling algorithm to df, resulting in df_thin
+    resampler = ParticleResampler(df, particle_species_mass=particle_species_mass)
+    if args.algorithm == "vranic":
+        # Merged macroparticles have non-uniform weights, so no set_weights_to(1).
+        df_thin = resampler.vranic_merging(
+            spatial_bins=tuple(args.spatial_bins),
+            momentum_bins=tuple(args.momentum_bins),
+            momentum_coordinates=args.momentum_coordinates,
+            log_scale=args.log_scale,
+        ).finalize()
+    else:
+        df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
 
     if not no_plot:
         phase_space_thin = PhaseSpaceVisualizer(df_thin, label="Resampled data")

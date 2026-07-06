@@ -38,6 +38,36 @@ path to the PIC output file, name of the particle species (`e_all` or
 If the initial PIC file has `N` macroparticles, the resulting reduced file will have `N/k`
 macroparticles.
 
+### Resampling algorithms
+
+The resampling algorithm is selected via `--algorithm` (or `-a`):
+
+- `thinning` (default): global leveling thinning [[2]](#books-references), controlled by `--reduction_factor`.
+- `vranic`: particle merging of Vranic *et al.* [[4]](#books-references). Particles are binned into
+  spatial and momentum cells, and each group of at least 4 particles sharing a cell is replaced by
+  two macroparticles which exactly conserve total weight, momentum and energy.
+
+For example:
+
+```console
+$ pixi run start --opmd_path <path_to_your_openPMD_file> --species <particle_species_name> --mass <particle mass> --algorithm vranic --spatial_bins 16 16 16 --momentum_bins 16 16 16
+```
+
+The Vranic merging accepts the following options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--spatial_bins NX NY NZ` | `16 16 16` | Number of position bins along x, y, z. |
+| `--momentum_bins NP NTHETA NPHI` | `16 16 16` | Number of momentum bins. |
+| `--momentum_coordinates {spherical,cartesian}` | `spherical` | Momentum space coordinates used for the binning; with `cartesian`, the bins are `NPX NPY NPZ`. |
+| `--log_scale` | off | Bin the momentum norm logarithmically (spherical only), useful for broad energy spectra. |
+
+Unlike thinning, the reduction factor is not set directly: coarser binning (fewer bins) merges more
+aggressively, at the cost of more phase-space smearing, while finer binning preserves the
+distribution better but merges less. Since the merged macroparticles have non-uniform weights, the
+`weights` column of the output file must be taken into account by the tracking code. For photons,
+use `--mass 0.0`.
+
 If you need a sample PIC output file for testing, you can download [lwfa.h5](https://transfer.sequanium.de/qjhu1I2t56/lwfa.h5) [212M].
 
 The code works with `openPMD`-compatible PIC codes, such as [`WarpX`](https://github.com/ECP-WarpX/WarpX), [`PIConGPU`](https://github.com/ComputationalRadiationPhysics/picongpu), [`fbpic`](https://github.com/fbpic/fbpic), etc.
@@ -71,6 +101,8 @@ For a computational estimate, here is a quote from Ref. [1]:
 [2] Muraviev, A. et al. "Strategies for particle resampling in PIC simulations." Comput. Phys. Commun. 262, 107826 (2021). [DOI](https://doi.org/10.1016/j.cpc.2021.107826)
 
 [3] Shimazaki, Hideaki, and Shigeru Shinomoto. "A method for selecting the bin size of a time histogram." Neural computation 19.6, 1503 (2007). [DOI](https://doi.org/10.1162/neco.2007.19.6.1503)
+
+[4] Vranic, Marija, et al. "Merging of macro-particles in particle-in-cell simulations." Comput. Phys. Commun. 191, 65 (2015). [DOI](https://doi.org/10.1016/j.cpc.2015.01.020)
 
 ## :loudspeaker: Acknowledgements
 

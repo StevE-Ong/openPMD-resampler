@@ -188,8 +188,9 @@ class OpenPMDLoader:
 
 
 class DataFrameUpdater:
-    def __init__(self, df_or_class_with_df):
+    def __init__(self, df_or_class_with_df, particle_species_mass: float = 1.0):
         self._df_or_class_with_df = df_or_class_with_df
+        self.particle_species_mass = particle_species_mass
 
     @property
     def df(self):
@@ -227,7 +228,7 @@ class DataAnalyzer:
 class ParticleDataReader:
     def __init__(self, file_path: str, particle_species_name: str = "e_all", particle_species_mass: float = 1.0):
         self.loader = OpenPMDLoader(file_path, particle_species_name, particle_species_mass)
-        self.updater = DataFrameUpdater(self.loader.df)
+        self.updater = DataFrameUpdater(self.loader.df, particle_species_mass)
         self.analyzer = DataAnalyzer(self.updater.df)
 
     @classmethod

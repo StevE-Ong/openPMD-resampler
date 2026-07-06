@@ -1,19 +1,29 @@
 """
 This module contains various particle resampling strategies for particle in cell data.
 """
+from typing import Tuple
+
 import numpy as np
 import pandas as pd
 
 from .log import logger
+from .units import constants
 from .utils import dataset_info
 from .reader import DataFrameUpdater
+from .vranic import VranicMerger
 
 
 class ParticleResampler:
-    def __init__(self, df: pd.DataFrame, weight_column: str = "weights"):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        weight_column: str = "weights",
+        particle_species_mass: float = 1.0,
+    ):
         self._df = df.copy()
         self.weight_column = weight_column
-        self.updater = DataFrameUpdater(self)
+        self.particle_species_mass = particle_species_mass
+        self.updater = DataFrameUpdater(self, particle_species_mass)
 
     @property
     def df(self):
@@ -96,6 +106,46 @@ class ParticleResampler:
         )
 
         logger.info("Dataset after thinning.\n")
+        dataset_info(self.df)
+
+        return self
+
+    def vranic_merging(
+        self,
+        spatial_bins: Tuple[int, int, int] = (16, 16, 16),
+        momentum_bins: Tuple[int, int, int] = (16, 16, 16),
+        momentum_coordinates: str = "spherical",
+        min_packet_size: int = 4,
+        max_packet_size: int = 4,
+        log_scale: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Merge macroparticles using the algorithm of Vranic et al.,
+        Comput. Phys. Commun. 191 (2015) 65-73.
+
+        Particles are binned into spatial cells and momentum cells, and each
+        packet of at least min_packet_size particles sharing a cell is replaced
+        by two macroparticles conserving total weight, momentum and energy.
+        Coarser binning merges more aggressively.
+
+        The particle mass is taken from the particle_species_mass given to the
+        constructor (relative to the electron mass, 0.0 for photons).
+        """
+        merger = VranicMerger(
+            self.df,
+            mass_mev_c2=self.particle_species_mass * constants.electron_mass_mev_c2,
+            weight_column=self.weight_column,
+        )
+        self.df = merger.merge(
+            spatial_bins=spatial_bins,
+            momentum_bins=momentum_bins,
+            momentum_coordinates=momentum_coordinates,
+            min_packet_size=min_packet_size,
+            max_packet_size=max_packet_size,
+            log_scale=log_scale,
+        )
+
+        logger.info("Dataset after Vranic merging.\n")
         dataset_info(self.df)
 
         return self
