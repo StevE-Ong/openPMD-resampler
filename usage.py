@@ -36,6 +36,9 @@ def main():
                         help="Vranic merging: momentum space coordinates (default: spherical)")
     parser.add_argument("--log_scale", action="store_true",
                         help="Vranic merging: bin the momentum norm logarithmically.")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Vranic/Voronoi merging: PyTorch device, e.g. 'cuda', 'cuda:1' or 'cpu'"
+                             " (default: the GPU if available, both NVIDIA CUDA and AMD ROCm, else the CPU)")
     parser.add_argument("--min_particles_to_merge", type=int, default=8,
                         help="Voronoi merging: minimum number of macroparticles in a Voronoi cell needed to merge them (default: 8)")
     parser.add_argument("--pos_spread_threshold", type=float, default=0.5,
@@ -72,6 +75,7 @@ def main():
             momentum_bins=tuple(args.momentum_bins),
             momentum_coordinates=args.momentum_coordinates,
             log_scale=args.log_scale,
+            device=args.device,
         ).finalize()
     elif args.algorithm == "voronoi":
         df_thin = resampler.voronoi_merging(
@@ -81,6 +85,7 @@ def main():
             abs_mom_spread_threshold=args.abs_mom_spread_threshold,
             rel_mom_spread_threshold=args.rel_mom_spread_threshold,
             min_mean_energy_kev=args.min_mean_energy,
+            device=args.device,
         ).finalize()
     else:
         df_thin = resampler.global_leveling_thinning(k=reduction_factor).finalize()

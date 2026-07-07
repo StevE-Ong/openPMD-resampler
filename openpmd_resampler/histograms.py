@@ -1,9 +1,60 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
 from .plot_utils import add_grid, customize_tick_labels
+
+try:
+    import torch
+except ImportError:  # torch only accelerates the histograms; numpy suffices
+    torch = None
+
+
+def _uniform_histogram(
+    values: np.ndarray,
+    number_of_intervals: int,
+    weights: Optional[np.ndarray] = None,
+    log_bins: bool = False,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Histogram on uniformly spaced bins (linear, or uniform in log10 for
+    log_bins) between the data min and max, like np.histogram on
+    np.histogram_bin_edges / np.logspace edges. Aggregates on the GPU when
+    PyTorch sees one (NVIDIA CUDA and AMD ROCm builds both expose it as
+    "cuda") and falls back to NumPy otherwise; values on a bin boundary may
+    land one bin off compared to np.histogram, which is invisible at plot
+    resolution. Returns (bin_edges, counts).
+    """
+    if torch is not None and torch.cuda.is_available():
+        # torch.tensor copies: pandas/numpy may hand out read-only arrays.
+        tensor = torch.tensor(values, device="cuda")
+        if log_bins:
+            tensor = torch.log10(tensor)
+        low, high = (edge.item() for edge in torch.aminmax(tensor))
+        if high == low:  # like np.histogram_bin_edges for constant data
+            low, high = low - 0.5, high + 0.5
+        scaled = (tensor - low) / (high - low) * number_of_intervals
+        indices = scaled.long().clamp_(0, number_of_intervals - 1)
+        if weights is None:
+            counts = torch.bincount(indices, minlength=number_of_intervals)
+        else:
+            counts = torch.zeros(
+                number_of_intervals, dtype=torch.float32, device="cuda"
+            ).index_add_(0, indices, torch.tensor(weights, device="cuda"))
+        bin_edges = np.linspace(low, high, number_of_intervals + 1)
+        if log_bins:
+            bin_edges = 10.0**bin_edges
+        return bin_edges, counts.cpu().numpy()
+
+    if log_bins:
+        bin_edges = np.logspace(
+            np.log10(values.min()), np.log10(values.max()), num=number_of_intervals + 1
+        )
+    else:
+        bin_edges = np.histogram_bin_edges(values, bins=number_of_intervals)
+    counts, bin_edges = np.histogram(values, bins=bin_edges, weights=weights)
+    return bin_edges, counts
 
 
 def set_y_axis_tick_color(axes_and_colors):
@@ -124,12 +175,10 @@ class StandardHistogram(Histogram):
         self.col = col
 
     def compute_histogram(self):
-        linear_bins = np.histogram_bin_edges(self.df[self.col], bins=self.bins)
-
-        counts, bin_edges = np.histogram(
-            self.df[self.col],
-            bins=linear_bins,
-            weights=self.df[self.weight_col],
+        bin_edges, counts = _uniform_histogram(
+            self.df[self.col].to_numpy(),
+            self.bins,
+            weights=self.df[self.weight_col].to_numpy(),
         )
 
         density = counts
@@ -166,14 +215,11 @@ class WeightHistogram(Histogram):
     bins = 100
 
     def compute_histogram(self):
-        # Define the logarithmic bins
-        log_bins = np.logspace(
-            np.log10(self.df[self.weight_col].min()),
-            np.log10(self.df[self.weight_col].max()),
-            num=self.bins,
-            base=10,
+        # Logarithmic bins between the smallest and largest weight; self.bins
+        # counts the edges, as np.logspace did before.
+        bin_edges, counts = _uniform_histogram(
+            self.df[self.weight_col].to_numpy(), self.bins - 1, log_bins=True
         )
-        counts, bin_edges = np.histogram(self.df[self.weight_col], bins=log_bins)
 
         # The width of the bins in log scale is the difference in log-space of the bin edges
         bin_width = np.diff(np.log10(bin_edges))

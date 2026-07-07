@@ -67,6 +67,7 @@ The Vranic merging accepts the following options:
 | `--momentum_bins NP NTHETA NPHI` | `16 16 16` | Number of momentum bins. |
 | `--momentum_coordinates {spherical,cartesian}` | `spherical` | Momentum space coordinates used for the binning; with `cartesian`, the bins are `NPX NPY NPZ`. |
 | `--log_scale` | off | Bin the momentum norm logarithmically (spherical only), useful for broad energy spectra. |
+| `--device D` | auto | PyTorch device the merge runs on, e.g. `cuda`, `cuda:1` or `cpu`. By default the GPU is used when one is available (NVIDIA CUDA and AMD ROCm builds of PyTorch both expose it as `cuda`), the CPU otherwise. |
 
 The Voronoi merging accepts the following options, mirroring the PIConGPU plugin:
 
@@ -78,6 +79,7 @@ The Voronoi merging accepts the following options, mirroring the PIConGPU plugin
 | `--abs_mom_spread_threshold T` | `-1` (disabled) | Below this absolute spread in momentum a cell can be merged, in units of $m_e c$. |
 | `--rel_mom_spread_threshold T` | `-1` (disabled) | Below this spread in momentum relative to the cell's mean momentum a cell can be merged. Exactly one of the two momentum thresholds must be enabled. |
 | `--min_mean_energy E` | `511.0` | Minimum mean kinetic energy in keV of a Voronoi cell needed to merge it (`0` disables the criterion). |
+| `--device D` | auto | Same as for the Vranic merging. |
 
 For example:
 
@@ -90,6 +92,10 @@ Unlike thinning, the merging algorithms do not set the reduction factor directly
 smearing, while finer settings preserve the distribution better but merge less. Since the merged
 macroparticles have non-uniform weights, the `weights` column of the output file must be taken into
 account by the tracking code. For photons, use `--mass 0.0`.
+
+Both merging algorithms run on PyTorch, on the GPU when one is available. Spatial cells never
+interact, so datasets larger than the GPU memory are automatically processed in chunks of whole
+cells sized to the free GPU memory, without changing the result.
 
 If you need a sample PIC output file for testing, you can download [lwfa.h5](https://transfer.sequanium.de/qjhu1I2t56/lwfa.h5) [212M].
 

@@ -20,15 +20,24 @@ spatial bins given by the user instead of blocks of PIC grid cells (there is
 no grid in post-processing), and the minimum mean energy criterion is only
 applied in the momentum stage, where the mean momentum is available.
 
-Particles are kept sorted so that each Voronoi cell is a contiguous segment:
-cluster statistics are segment sums (np.add.reduceat) over the float32
-particle data and a split is an O(n) stable partition of the segment, so no
-sorting happens after the initial spatial binning. The two splitting stages
-run as separate passes, each touching only the coordinates it subdivides, and
-the splitting itself only touches the particles of the splitting clusters.
-All arithmetic is done in the single precision of the input data.
+The numerics run on PyTorch tensors in the float32 precision of the input
+data, on the GPU when one is available: the "cuda" device covers both NVIDIA
+(CUDA) and AMD (ROCm/HIP) builds of PyTorch, and the same code runs on the
+CPU otherwise. Since initial cells never interact, the particles are
+processed in chunks of whole initial cells sized to the free GPU memory, so
+datasets much larger than the GPU still merge; only the chunk at hand lives
+on the device. Within a chunk, particles are kept sorted so that each
+Voronoi cell is a contiguous segment: cluster statistics are index_add_
+scatter sums keyed by the per-particle segment index, and a split is an O(n)
+stable partition of the segment, so no sorting happens after the initial
+spatial binning. The two splitting stages run as separate passes, each
+touching only the coordinates it subdivides, and the splitting itself only
+touches the particles of the splitting clusters. On the GPU the
+floating-point scatter sums use atomics, so results are not bit-reproducible
+between runs; conservation statistics are accumulated in float64 on the CPU
+for logging.
 """
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,19 +45,53 @@ import pandas as pd
 from .log import logger
 from .units import constants
 
+try:
+    import torch
+except ImportError:  # torch is only needed for Voronoi merging
+    torch = None
+
 POSITION_COLUMNS = ["position_x_m", "position_y_m", "position_z_m"]
 MOMENTUM_COLUMNS = ["momentum_x_mev_c", "momentum_y_mev_c", "momentum_z_mev_c"]
 
+# Rough transient GPU bytes per particle at the peak of a splitting pass,
+# used to size the chunks of initial cells.
+BYTES_PER_PARTICLE = 160
+
+
+def _resolve_device(device: Optional[str]) -> "torch.device":
+    if device is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    resolved = torch.device(device)
+    if resolved.type == "cuda":
+        available = torch.cuda.device_count()
+        if available == 0:
+            raise ValueError(
+                f"device '{device}' requested but PyTorch sees no GPU;"
+                " omit the device to fall back to the CPU."
+            )
+        if resolved.index is not None and resolved.index >= available:
+            raise ValueError(
+                f"device '{device}' requested but only {available} GPU(s) are"
+                f" present (cuda:0..cuda:{available - 1})."
+            )
+    return resolved
+
 
 def _cluster_stats(
-    values: np.ndarray, weights: np.ndarray, starts: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    values: "torch.Tensor",
+    weights: "torch.Tensor",
+    segment: "torch.Tensor",
+    number_of_segments: int,
+) -> Tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"]:
     """Weighted mean and variance of each column of values per segment."""
-    weighted = weights[:, np.newaxis] * values
-    weight_sums = np.add.reduceat(weights, starts)
-    mean = np.add.reduceat(weighted, starts) / weight_sums[:, np.newaxis]
-    mean_square = np.add.reduceat(weighted * values, starts) / weight_sums[:, np.newaxis]
-    variance = np.maximum(mean_square - mean**2, 0.0)
+    weighted = weights[:, None] * values
+    zeros = lambda *shape: torch.zeros(*shape, dtype=values.dtype, device=values.device)
+    weight_sums = zeros(number_of_segments).index_add_(0, segment, weights)
+    mean = zeros((number_of_segments, 3)).index_add_(0, segment, weighted)
+    mean /= weight_sums[:, None]
+    mean_square = zeros((number_of_segments, 3)).index_add_(0, segment, weighted * values)
+    mean_square /= weight_sums[:, None]
+    variance = torch.clamp(mean_square - mean**2, min=0.0)
     return weight_sums, mean, variance
 
 
@@ -62,51 +105,58 @@ class _SplitPlan:
 
     def __init__(
         self,
-        values: np.ndarray,
-        counts: np.ndarray,
-        segment: np.ndarray,
-        splits: np.ndarray,
-        mean: np.ndarray,
-        variance: np.ndarray,
+        values: "torch.Tensor",
+        counts: "torch.Tensor",
+        segment: "torch.Tensor",
+        splits: "torch.Tensor",
+        mean: "torch.Tensor",
+        variance: "torch.Tensor",
     ):
-        self.rows = np.flatnonzero(splits[segment])
+        device = values.device
+        self.rows = torch.nonzero(splits[segment]).squeeze(1)
         self.counts = counts[splits]
-        self.starts = np.cumsum(self.counts) - self.counts
-        self.segment = np.repeat(np.arange(self.counts.size, dtype=np.int32), self.counts)
+        self.starts = torch.cumsum(self.counts, dim=0) - self.counts
+        self.segment = torch.repeat_interleave(
+            torch.arange(self.counts.shape[0], device=device), self.counts
+        )
 
-        component = variance[splits].argmax(axis=1)[self.segment]
+        component = torch.argmax(variance[splits], dim=1)[self.segment]
         self.side = values[self.rows, component] >= mean[splits][self.segment, component]
-        self.side_int = self.side.astype(np.int32)
-        if self.counts.size > 0:
-            self.higher_counts = np.add.reduceat(self.side_int, self.starts)
-        else:
-            self.higher_counts = np.zeros(0, dtype=np.int32)
+        self.side_int = self.side.long()
+        self.higher_counts = torch.zeros(
+            self.counts.shape[0], dtype=torch.long, device=device
+        ).index_add_(0, self.segment, self.side_int)
 
-    def degenerate(self) -> np.ndarray:
+    def degenerate(self) -> "torch.Tensor":
         """Splits that leave one sub-cell empty and thus make no progress."""
         return (self.higher_counts == 0) | (self.higher_counts == self.counts)
 
     def scatter_to_children(
-        self, arrays: Tuple[np.ndarray, ...]
-    ) -> Tuple[Tuple[np.ndarray, ...], np.ndarray]:
+        self, arrays: Tuple["torch.Tensor", ...]
+    ) -> Tuple[Tuple["torch.Tensor", ...], "torch.Tensor"]:
         """
         Compact the particles of the splitting segments into two contiguous
         child segments each (lower side first, preserving order), dropping
         everything else. Returns the compacted arrays and the new starts.
         """
-        child_counts = np.column_stack((self.counts - self.higher_counts, self.higher_counts)).ravel()
-        child_starts = np.cumsum(child_counts) - child_counts
+        child_counts = torch.stack(
+            (self.counts - self.higher_counts, self.higher_counts), dim=1
+        ).reshape(-1)
+        child_starts = torch.cumsum(child_counts, dim=0) - child_counts
 
-        rank_in_segment = np.arange(self.rows.size) - self.starts[self.segment]
-        higher_before = np.cumsum(self.side_int) - self.side_int
-        higher_before -= higher_before[self.starts][self.segment]
-        offset_in_child = np.where(self.side, higher_before, rank_in_segment - higher_before)
+        rank_in_segment = (
+            torch.arange(self.rows.shape[0], device=self.rows.device)
+            - self.starts[self.segment]
+        )
+        higher_before = torch.cumsum(self.side_int, dim=0) - self.side_int
+        higher_before = higher_before - higher_before[self.starts][self.segment]
+        offset_in_child = torch.where(self.side, higher_before, rank_in_segment - higher_before)
         destination = child_starts[2 * self.segment + self.side_int] + offset_in_child
 
         compacted = []
         for array in arrays:
             gathered = array[self.rows]
-            new = np.empty_like(gathered)
+            new = torch.empty_like(gathered)
             new[destination] = gathered
             compacted.append(new)
         return tuple(compacted), child_starts
@@ -126,6 +176,7 @@ class VoronoiMerger:
         abs_mom_spread_threshold: float = -1.0,
         rel_mom_spread_threshold: float = -1.0,
         min_mean_energy_kev: float = 511.0,
+        device: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Merge macroparticles, conserving total weight and momentum exactly and
@@ -144,7 +195,17 @@ class VoronoiMerger:
             Exactly one of the two momentum thresholds must be enabled.
         min_mean_energy_kev: minimum mean kinetic energy in keV of a Voronoi
             cell needed to merge it (0 disables the criterion).
+        device: PyTorch device string, e.g. "cuda", "cuda:1" or "cpu". The
+            default picks the GPU when one is available (NVIDIA and AMD ROCm
+            builds of PyTorch both expose it as "cuda") and the CPU otherwise.
+            Datasets larger than the GPU memory are processed in chunks of
+            whole initial cells, which does not change the result.
         """
+        if torch is None:
+            raise ImportError(
+                "Voronoi merging requires PyTorch; install the 'pytorch-gpu' (or"
+                " 'pytorch' for CPU-only) package in the pixi environment."
+            )
         if min_particles_to_merge < 2:
             raise ValueError("min_particles_to_merge must be at least 2 for the merge to reduce particles.")
         if (abs_mom_spread_threshold > 0) == (rel_mom_spread_threshold > 0):
@@ -155,147 +216,117 @@ class VoronoiMerger:
         if min_mean_energy_kev < 0:
             raise ValueError("min_mean_energy_kev must be non-negative.")
 
-        position = np.ascontiguousarray(self.df[POSITION_COLUMNS].to_numpy())
-        momentum = np.ascontiguousarray(self.df[MOMENTUM_COLUMNS].to_numpy())
-        weight = self.df[self.weight_column].to_numpy()
+        torch_device = _resolve_device(device)
+        logger.info("Voronoi merging on device '%s'.\n", torch_device)
 
-        number_initial = position.shape[0]
-        total_weight_before = weight.sum()
-        total_momentum_before = weight @ momentum
-        energy = np.sqrt(np.einsum("ij,ij->i", momentum, momentum) + self.mass**2)
-        total_energy_before = weight @ energy
-        del energy
+        position_np = self.df[POSITION_COLUMNS].to_numpy(np.float32)
+        momentum_np = self.df[MOMENTUM_COLUMNS].to_numpy(np.float32)
+        weight_np = self.df[self.weight_column].to_numpy(np.float32)
+
+        # Conservation totals for the log, in float64 on the CPU.
+        number_initial = position_np.shape[0]
+        weight64 = weight_np.astype(np.float64)
+        momentum64 = momentum_np.astype(np.float64)
+        total_weight_before = weight64.sum()
+        total_momentum_before = weight64 @ momentum64
+        total_energy_before = weight64 @ np.sqrt(
+            np.einsum("ij,ij->i", momentum64, momentum64) + self.mass**2
+        )
 
         # Express positions in units of the initial cell edge length, so that
         # position spreads are compared like in PIConGPU (cell edge units).
-        origin = position.min(axis=0)
-        extent = position.max(axis=0) - origin
-        bins = np.asarray(spatial_bins, dtype=np.int32)
-        cell_edge = np.where(extent > 0, extent / bins, 1.0).astype(position.dtype)
-        all_scaled_positions = (position - origin) / cell_edge
+        origin = position_np.min(axis=0)
+        extent = position_np.max(axis=0) - origin
+        cell_edge = np.where(
+            extent > 0, extent / np.asarray(spatial_bins, dtype=np.float32), np.float32(1.0)
+        ).astype(np.float32)
 
-        # Sort the particles by initial cell, once; afterwards every Voronoi
-        # cell stays a contiguous segment described by its start offset. The
-        # cast to the narrowest integer type makes the radix sort cheaper.
-        initial_cell = np.ravel_multi_index(
-            tuple(
-                np.clip(all_scaled_positions[:, i].astype(np.int32), 0, bins[i] - 1)
-                for i in range(3)
-            ),
-            bins,
-        ).astype(np.min_scalar_type(int(bins.prod()) - 1))
-        order = np.argsort(initial_cell, kind="stable")
-        sorted_cell = initial_cell[order]
-        new_segment = np.empty(number_initial, dtype=bool)
-        new_segment[0] = True
-        new_segment[1:] = sorted_cell[1:] != sorted_cell[:-1]
-        starts = np.flatnonzero(new_segment)
+        # Initial cell key and one stable sort, on the device; the key is
+        # built column by column to keep the footprint at a few bytes per
+        # particle. Afterwards every initial cell is a contiguous segment.
+        key_dtype = torch.int32 if int(np.prod(spatial_bins)) < 2**31 else torch.int64
+        key = torch.zeros(number_initial, dtype=key_dtype, device=torch_device)
+        for axis in range(3):
+            column = torch.tensor(position_np[:, axis], device=torch_device)
+            column.sub_(float(origin[axis])).div_(float(cell_edge[axis]))
+            column.clamp_(0.0, float(spatial_bins[axis] - 1))
+            key.mul_(spatial_bins[axis]).add_(column.int())
+        del column
+        order = torch.argsort(key, stable=True)
+        sorted_key = key[order]
+        del key
+        order_np = order.cpu().numpy()
+        boundary = torch.empty(number_initial, dtype=torch.bool, device=torch_device)
+        boundary[0] = True
+        boundary[1:] = sorted_key[1:] != sorted_key[:-1]
+        cell_starts = torch.nonzero(boundary).squeeze(1).cpu().numpy()
+        del order, sorted_key, boundary
+
+        # Group whole initial cells into chunks the free GPU memory can hold;
+        # cells never interact, so chunking does not change the result. A
+        # single cell larger than the target becomes its own chunk.
+        chunk_target = number_initial
+        if torch_device.type == "cuda":
+            free_bytes, _ = torch.cuda.mem_get_info(torch_device)
+            chunk_target = max(int(free_bytes * 0.45) // BYTES_PER_PARTICLE, 1_000_000)
+        chunk_of_cell = cell_starts // chunk_target
+        chunk_start_cells = np.concatenate(
+            [[0], np.flatnonzero(np.diff(chunk_of_cell)) + 1]
+        )
+        cell_offsets = np.append(cell_starts, number_initial)
+        chunk_bounds = np.append(chunk_start_cells, cell_starts.size)
+        if chunk_start_cells.size > 1:
+            logger.info(
+                "Processing %d chunks of initial cells to fit the GPU memory.\n",
+                chunk_start_cells.size,
+            )
 
         pos_threshold2 = pos_spread_threshold**2
         abs_mom_threshold2 = float(abs_mom_spread_threshold * constants.electron_mass_mev_c2) ** 2
         min_mean_energy_mev = min_mean_energy_kev / 1000.0
 
-        row_dtype = np.int32 if number_initial < 2**31 else np.int32
-        kept_rows = [np.empty(0, dtype=row_dtype)]
+        origin_gpu = torch.tensor(origin, device=torch_device)
+        cell_edge_gpu = torch.tensor(cell_edge, device=torch_device)
 
-        # ---- Position stage: split until every cluster is spatially narrow.
-        # Only positions and weights are carried; row tracks original rows.
-        scaled_position = all_scaled_positions[order]
-        working_weight = weight[order]
-        row = order.astype(row_dtype)
-        pending_rows = [np.empty(0, dtype=row_dtype)]
-        pending_counts = [np.empty(0, dtype=np.int32)]
-
-        while working_weight.size > 0:
-            counts = np.diff(starts, append=working_weight.size)
-            segment = np.repeat(np.arange(starts.size, dtype=np.int32), counts)
-
-            _, mean, variance = _cluster_stats(scaled_position, working_weight, starts)
-
-            abort = counts < min_particles_to_merge
-            splits = ~abort & (variance.max(axis=1) > pos_threshold2)
-            plan = _SplitPlan(scaled_position, counts, segment, splits, mean, variance)
-
-            degenerate = plan.degenerate()
-            if degenerate.any():
-                bad = np.flatnonzero(splits)[degenerate]
-                abort[bad] = True
-                splits[bad] = False
-                plan = _SplitPlan(scaled_position, counts, segment, splits, mean, variance)
-
-            # Spatially narrow clusters queue up for the momentum stage.
-            narrow = ~abort & ~splits
-            kept_rows.append(row[abort[segment]])
-            pending_rows.append(row[narrow[segment]])
-            pending_counts.append(counts[narrow])
-
-            (scaled_position, working_weight, row), starts = plan.scatter_to_children(
-                (scaled_position, working_weight, row)
+        kept_list = []
+        merged_position_list, merged_momentum_list, merged_weight_list = [], [], []
+        for first_cell, last_cell in zip(chunk_bounds[:-1], chunk_bounds[1:]):
+            first_row, last_row = cell_offsets[first_cell], cell_offsets[last_cell]
+            rows_np = order_np[first_row:last_row]
+            scaled_position = torch.tensor(position_np[rows_np], device=torch_device)
+            scaled_position.sub_(origin_gpu).div_(cell_edge_gpu)
+            working_weight = torch.tensor(weight_np[rows_np], device=torch_device)
+            row = torch.tensor(rows_np, dtype=torch.long, device=torch_device)
+            starts = torch.tensor(
+                cell_starts[first_cell:last_cell] - first_row,
+                dtype=torch.long,
+                device=torch_device,
             )
-
-        # ---- Momentum stage: split the spatially narrow clusters until their
-        # momentum spread is small, then merge them. Positions are looked up
-        # from the original rows only when clusters actually merge.
-        row = np.concatenate(pending_rows)
-        counts = np.concatenate(pending_counts)
-        starts = np.cumsum(counts) - counts
-        working_momentum = momentum[row]
-        working_weight = weight[row]
-
-        merged_positions = [np.empty((0, 3), dtype=position.dtype)]
-        merged_momenta = [np.empty((0, 3), dtype=momentum.dtype)]
-        merged_weights = [np.empty(0, dtype=weight.dtype)]
-
-        while working_weight.size > 0:
-            counts = np.diff(starts, append=working_weight.size)
-            segment = np.repeat(np.arange(starts.size, dtype=np.int32), counts)
-
-            weight_sums, mean, variance = _cluster_stats(working_momentum, working_weight, starts)
-
-            # Choose the momentum spread threshold of each cluster.
-            if rel_mom_spread_threshold > 0:
-                mom_threshold2 = rel_mom_spread_threshold**2 * np.sum(mean**2, axis=1)
-            else:
-                mom_threshold2 = abs_mom_threshold2
-            mean_energy = np.sqrt(np.sum(mean**2, axis=1) + self.mass**2) - self.mass
-
-            abort = counts < min_particles_to_merge
-            abort |= mean_energy < min_mean_energy_mev
-            splits = ~abort & (variance.max(axis=1) > mom_threshold2)
-            plan = _SplitPlan(working_momentum, counts, segment, splits, mean, variance)
-
-            degenerate = plan.degenerate()
-            if degenerate.any():
-                bad = np.flatnonzero(splits)[degenerate]
-                abort[bad] = True
-                splits[bad] = False
-                plan = _SplitPlan(working_momentum, counts, segment, splits, mean, variance)
-
-            merges = ~abort & ~splits
-            kept_rows.append(row[abort[segment]])
-
-            if merges.any():
-                merge_rows = row[merges[segment]]
-                merge_counts = counts[merges]
-                merge_starts = np.cumsum(merge_counts) - merge_counts
-                centroid_sums = np.add.reduceat(
-                    weight[merge_rows, np.newaxis] * all_scaled_positions[merge_rows],
-                    merge_starts,
-                )
-                merged_positions.append(centroid_sums / weight_sums[merges, np.newaxis])
-                merged_momenta.append(mean[merges])
-                merged_weights.append(weight_sums[merges])
-
-            (working_momentum, working_weight, row), starts = plan.scatter_to_children(
-                (working_momentum, working_weight, row)
+            kept_np, merged = self._merge_cells(
+                scaled_position,
+                working_weight,
+                row,
+                starts,
+                position_np,
+                momentum_np,
+                weight_np,
+                origin_gpu,
+                cell_edge_gpu,
+                min_particles_to_merge,
+                pos_threshold2,
+                abs_mom_threshold2,
+                rel_mom_spread_threshold,
+                min_mean_energy_mev,
             )
+            kept_list.append(kept_np)
+            merged_position_list.append(merged[0])
+            merged_momentum_list.append(merged[1])
+            merged_weight_list.append(merged[2])
 
-        kept = np.concatenate(kept_rows)
-        new_position = np.concatenate(
-            [position[kept], np.concatenate(merged_positions) * cell_edge + origin]
-        )
-        new_momentum = np.concatenate([momentum[kept], np.concatenate(merged_momenta)])
-        new_weight = np.concatenate([weight[kept], np.concatenate(merged_weights)])
+        kept = np.concatenate(kept_list)
+        new_position = np.concatenate([position_np[kept]] + merged_position_list)
+        new_momentum = np.concatenate([momentum_np[kept]] + merged_momentum_list)
+        new_weight = np.concatenate([weight_np[kept]] + merged_weight_list)
 
         self.log_merge_statistics(
             number_initial,
@@ -307,6 +338,149 @@ class VoronoiMerger:
         )
 
         return self.build_dataframe(new_position, new_momentum, new_weight)
+
+    def _merge_cells(
+        self,
+        scaled_position: "torch.Tensor",
+        working_weight: "torch.Tensor",
+        row: "torch.Tensor",
+        starts: "torch.Tensor",
+        position_np: np.ndarray,
+        momentum_np: np.ndarray,
+        weight_np: np.ndarray,
+        origin_gpu: "torch.Tensor",
+        cell_edge_gpu: "torch.Tensor",
+        min_particles_to_merge: int,
+        pos_threshold2: float,
+        abs_mom_threshold2: float,
+        rel_mom_spread_threshold: float,
+        min_mean_energy_mev: float,
+    ) -> Tuple[np.ndarray, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        Run the two splitting stages on one chunk of whole initial cells,
+        already sorted so each cell is a contiguous segment. row carries the
+        original row of every particle; positions, momenta and weights of
+        specific rows are re-gathered from the CPU arrays when needed, so the
+        device only ever holds the chunk. Returns the kept original rows and
+        the merged (position, momentum, weight) as numpy arrays.
+        """
+        torch_device = scaled_position.device
+        mass = float(self.mass)
+        empty_rows = torch.empty(0, dtype=torch.long, device=torch_device)
+        kept_rows = [np.empty(0, dtype=np.int64)]
+
+        # ---- Position stage: split until every cluster is spatially narrow.
+        # Only positions and weights are carried; row tracks original rows.
+        pending_rows = [empty_rows]
+        pending_counts = [empty_rows]
+
+        while working_weight.shape[0] > 0:
+            counts = torch.diff(starts, append=starts.new_tensor([working_weight.shape[0]]))
+            segment = torch.repeat_interleave(
+                torch.arange(starts.shape[0], device=torch_device), counts
+            )
+
+            _, mean, variance = _cluster_stats(
+                scaled_position, working_weight, segment, starts.shape[0]
+            )
+
+            abort = counts < min_particles_to_merge
+            splits = ~abort & (variance.amax(dim=1) > pos_threshold2)
+            plan = _SplitPlan(scaled_position, counts, segment, splits, mean, variance)
+
+            degenerate = plan.degenerate()
+            if degenerate.any().item():
+                bad = torch.nonzero(splits).squeeze(1)[degenerate]
+                abort[bad] = True
+                splits[bad] = False
+                plan = _SplitPlan(scaled_position, counts, segment, splits, mean, variance)
+
+            # Spatially narrow clusters queue up for the momentum stage.
+            narrow = ~abort & ~splits
+            kept_rows.append(row[abort[segment]].cpu().numpy())
+            pending_rows.append(row[narrow[segment]])
+            pending_counts.append(counts[narrow])
+
+            (scaled_position, working_weight, row), starts = plan.scatter_to_children(
+                (scaled_position, working_weight, row)
+            )
+        del scaled_position
+
+        # ---- Momentum stage: split the spatially narrow clusters until their
+        # momentum spread is small, then merge them. Momenta and positions are
+        # gathered from the CPU arrays only for the rows that need them.
+        row = torch.cat(pending_rows)
+        counts = torch.cat(pending_counts)
+        starts = torch.cumsum(counts, dim=0) - counts
+        rows_np = row.cpu().numpy()
+        working_momentum = torch.tensor(momentum_np[rows_np], device=torch_device)
+        working_weight = torch.tensor(weight_np[rows_np], device=torch_device)
+
+        merged_positions = [np.empty((0, 3), dtype=np.float32)]
+        merged_momenta = [np.empty((0, 3), dtype=np.float32)]
+        merged_weights = [np.empty(0, dtype=np.float32)]
+
+        while working_weight.shape[0] > 0:
+            counts = torch.diff(starts, append=starts.new_tensor([working_weight.shape[0]]))
+            segment = torch.repeat_interleave(
+                torch.arange(starts.shape[0], device=torch_device), counts
+            )
+
+            weight_sums, mean, variance = _cluster_stats(
+                working_momentum, working_weight, segment, starts.shape[0]
+            )
+
+            # Choose the momentum spread threshold of each cluster.
+            mean_norm2 = torch.sum(mean**2, dim=1)
+            if rel_mom_spread_threshold > 0:
+                mom_threshold2 = rel_mom_spread_threshold**2 * mean_norm2
+            else:
+                mom_threshold2 = abs_mom_threshold2
+            mean_energy = torch.sqrt(mean_norm2 + mass**2) - mass
+
+            abort = counts < min_particles_to_merge
+            abort |= mean_energy < min_mean_energy_mev
+            splits = ~abort & (variance.amax(dim=1) > mom_threshold2)
+            plan = _SplitPlan(working_momentum, counts, segment, splits, mean, variance)
+
+            degenerate = plan.degenerate()
+            if degenerate.any().item():
+                bad = torch.nonzero(splits).squeeze(1)[degenerate]
+                abort[bad] = True
+                splits[bad] = False
+                plan = _SplitPlan(working_momentum, counts, segment, splits, mean, variance)
+
+            merges = ~abort & ~splits
+            kept_rows.append(row[abort[segment]].cpu().numpy())
+
+            if merges.any().item():
+                merge_rows_np = row[merges[segment]].cpu().numpy()
+                merge_counts = counts[merges]
+                merge_segment = torch.repeat_interleave(
+                    torch.arange(merge_counts.shape[0], device=torch_device), merge_counts
+                )
+                merge_scaled = torch.tensor(position_np[merge_rows_np], device=torch_device)
+                merge_scaled.sub_(origin_gpu).div_(cell_edge_gpu)
+                merge_weight = torch.tensor(weight_np[merge_rows_np], device=torch_device)
+                centroid_sums = torch.zeros(
+                    (merge_counts.shape[0], 3), dtype=merge_scaled.dtype, device=torch_device
+                ).index_add_(0, merge_segment, merge_weight[:, None] * merge_scaled)
+                centroids = centroid_sums / weight_sums[merges][:, None]
+                merged_positions.append(
+                    (centroids * cell_edge_gpu + origin_gpu).cpu().numpy()
+                )
+                merged_momenta.append(mean[merges].cpu().numpy())
+                merged_weights.append(weight_sums[merges].cpu().numpy())
+
+            (working_momentum, working_weight, row), starts = plan.scatter_to_children(
+                (working_momentum, working_weight, row)
+            )
+
+        return np.concatenate(kept_rows), (
+            np.concatenate(merged_positions),
+            np.concatenate(merged_momenta),
+            np.concatenate(merged_weights),
+        )
 
     def build_dataframe(
         self, position: np.ndarray, momentum: np.ndarray, weight: np.ndarray
@@ -335,6 +509,8 @@ class VoronoiMerger:
         total_energy_before: float,
     ):
         number_final = weight.shape[0]
+        weight = weight.astype(np.float64)
+        momentum = momentum.astype(np.float64)
         energy = np.sqrt(np.sum(momentum**2, axis=1) + self.mass**2)
         logger.info(
             "Voronoi merging: %d -> %d macroparticles (%.2f%% reduction).\n",
