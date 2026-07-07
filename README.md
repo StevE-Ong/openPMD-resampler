@@ -46,6 +46,12 @@ The resampling algorithm is selected via `--algorithm` (or `-a`):
 - `vranic`: particle merging of Vranic *et al.* [[4]](#books-references). Particles are binned into
   spatial and momentum cells, and each group of at least 4 particles sharing a cell is replaced by
   two macroparticles which exactly conserve total weight, momentum and energy.
+- `voronoi`: Voronoi particle merging of Luu, Tückmantel and Pukhov [[5]](#books-references), as
+  implemented in the [particle merger plugin](https://picongpu.readthedocs.io/en/0.5.0/usage/plugins/particleMerger.html)
+  of PIConGPU. Particles are grouped into spatial cells which are subdivided recursively, first in
+  position and then in momentum space, until the spread of every cluster falls below the given
+  thresholds; each remaining cluster is replaced by a single macroparticle which exactly conserves
+  total weight and momentum, with an energy error bounded by the momentum spread threshold.
 
 For example:
 
@@ -62,11 +68,28 @@ The Vranic merging accepts the following options:
 | `--momentum_coordinates {spherical,cartesian}` | `spherical` | Momentum space coordinates used for the binning; with `cartesian`, the bins are `NPX NPY NPZ`. |
 | `--log_scale` | off | Bin the momentum norm logarithmically (spherical only), useful for broad energy spectra. |
 
-Unlike thinning, the reduction factor is not set directly: coarser binning (fewer bins) merges more
-aggressively, at the cost of more phase-space smearing, while finer binning preserves the
-distribution better but merges less. Since the merged macroparticles have non-uniform weights, the
-`weights` column of the output file must be taken into account by the tracking code. For photons,
-use `--mass 0.0`.
+The Voronoi merging accepts the following options, mirroring the PIConGPU plugin:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--spatial_bins NX NY NZ` | `16 16 16` | Number of initial Voronoi cells along x, y, z. |
+| `--min_particles_to_merge N` | `8` | Minimum number of macroparticles in a Voronoi cell needed to merge them into a single macroparticle. |
+| `--pos_spread_threshold T` | `0.5` | Below this spread in position a cell can be merged, in units of the initial spatial cell edge length. |
+| `--abs_mom_spread_threshold T` | `-1` (disabled) | Below this absolute spread in momentum a cell can be merged, in units of $m_e c$. |
+| `--rel_mom_spread_threshold T` | `-1` (disabled) | Below this spread in momentum relative to the cell's mean momentum a cell can be merged. Exactly one of the two momentum thresholds must be enabled. |
+| `--min_mean_energy E` | `511.0` | Minimum mean kinetic energy in keV of a Voronoi cell needed to merge it (`0` disables the criterion). |
+
+For example:
+
+```console
+$ pixi run start --opmd_path <path_to_your_openPMD_file> --species <particle_species_name> --mass <particle mass> --algorithm voronoi --rel_mom_spread_threshold 0.05 --spatial_bins 32 32 32
+```
+
+Unlike thinning, the merging algorithms do not set the reduction factor directly: coarser binning
+(fewer bins) or larger spread thresholds merge more aggressively, at the cost of more phase-space
+smearing, while finer settings preserve the distribution better but merge less. Since the merged
+macroparticles have non-uniform weights, the `weights` column of the output file must be taken into
+account by the tracking code. For photons, use `--mass 0.0`.
 
 If you need a sample PIC output file for testing, you can download [lwfa.h5](https://transfer.sequanium.de/qjhu1I2t56/lwfa.h5) [212M].
 
@@ -103,6 +126,8 @@ For a computational estimate, here is a quote from Ref. [1]:
 [3] Shimazaki, Hideaki, and Shigeru Shinomoto. "A method for selecting the bin size of a time histogram." Neural computation 19.6, 1503 (2007). [DOI](https://doi.org/10.1162/neco.2007.19.6.1503)
 
 [4] Vranic, Marija, et al. "Merging of macro-particles in particle-in-cell simulations." Comput. Phys. Commun. 191, 65 (2015). [DOI](https://doi.org/10.1016/j.cpc.2015.01.020)
+
+[5] Luu, Phuc T., Tückmantel, T. and Pukhov, A. "Voronoi particle merging algorithm for PIC codes." Comput. Phys. Commun. 202, 165 (2016). [DOI](https://doi.org/10.1016/j.cpc.2016.01.009)
 
 ## :loudspeaker: Acknowledgements
 

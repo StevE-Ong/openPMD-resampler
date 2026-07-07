@@ -11,6 +11,7 @@ from .units import constants
 from .utils import dataset_info
 from .reader import DataFrameUpdater
 from .vranic import VranicMerger
+from .voronoi import VoronoiMerger
 
 
 class ParticleResampler:
@@ -146,6 +147,52 @@ class ParticleResampler:
         )
 
         logger.info("Dataset after Vranic merging.\n")
+        dataset_info(self.df)
+
+        return self
+
+    def voronoi_merging(
+        self,
+        spatial_bins: Tuple[int, int, int] = (16, 16, 16),
+        min_particles_to_merge: int = 8,
+        pos_spread_threshold: float = 0.5,
+        abs_mom_spread_threshold: float = -1.0,
+        rel_mom_spread_threshold: float = -1.0,
+        min_mean_energy_kev: float = 511.0,
+    ) -> pd.DataFrame:
+        """
+        Merge macroparticles using the Voronoi algorithm of Luu, Tueckmantel
+        and Pukhov, Comput. Phys. Commun. 202 (2016) 165-174, as implemented
+        in the particleMerging plugin of PIConGPU.
+
+        Particles are grouped into spatial cells that are subdivided
+        recursively, first in position and then in momentum space, until the
+        spread of every cluster falls below the given thresholds; each cluster
+        of at least min_particles_to_merge particles is then replaced by a
+        single macroparticle, conserving total weight and momentum exactly and
+        energy up to the momentum spread threshold. Exactly one of
+        abs_mom_spread_threshold (in m_e*c) and rel_mom_spread_threshold must
+        be positive; pos_spread_threshold is in units of the initial spatial
+        cell edge length and min_mean_energy_kev in keV.
+
+        The particle mass is taken from the particle_species_mass given to the
+        constructor (relative to the electron mass, 0.0 for photons).
+        """
+        merger = VoronoiMerger(
+            self.df,
+            mass_mev_c2=self.particle_species_mass * constants.electron_mass_mev_c2,
+            weight_column=self.weight_column,
+        )
+        self.df = merger.merge(
+            spatial_bins=spatial_bins,
+            min_particles_to_merge=min_particles_to_merge,
+            pos_spread_threshold=pos_spread_threshold,
+            abs_mom_spread_threshold=abs_mom_spread_threshold,
+            rel_mom_spread_threshold=rel_mom_spread_threshold,
+            min_mean_energy_kev=min_mean_energy_kev,
+        )
+
+        logger.info("Dataset after Voronoi merging.\n")
         dataset_info(self.df)
 
         return self

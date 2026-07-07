@@ -20,13 +20,13 @@ def main():
     parser.add_argument("--mass", "-m", type=float, default=1.0,
                         help="Particle mass relative to the electron mass (default: 1.0)")
     parser.add_argument("--algorithm", "-a", type=str, default="thinning",
-                        choices=["thinning", "vranic"],
-                        help="Resampling algorithm: global leveling thinning or Vranic merging (default: thinning)")
+                        choices=["thinning", "vranic", "voronoi"],
+                        help="Resampling algorithm: global leveling thinning, Vranic merging or Voronoi merging (default: thinning)")
     parser.add_argument("--reduction_factor", "-k", type=float, default=2.0,
                         help="The 'k' level for global leveling thinning (default: 2.0)")
     parser.add_argument("--spatial_bins", type=int, nargs=3, default=[16, 16, 16],
                         metavar=("NX", "NY", "NZ"),
-                        help="Vranic merging: number of spatial bins (default: 16 16 16)")
+                        help="Vranic/Voronoi merging: number of spatial bins (default: 16 16 16)")
     parser.add_argument("--momentum_bins", type=int, nargs=3, default=[16, 16, 16],
                         metavar=("NP", "NTHETA", "NPHI"),
                         help="Vranic merging: number of momentum bins (default: 16 16 16)")
@@ -35,6 +35,16 @@ def main():
                         help="Vranic merging: momentum space coordinates (default: spherical)")
     parser.add_argument("--log_scale", action="store_true",
                         help="Vranic merging: bin the momentum norm logarithmically.")
+    parser.add_argument("--min_particles_to_merge", type=int, default=8,
+                        help="Voronoi merging: minimum number of macroparticles in a Voronoi cell needed to merge them (default: 8)")
+    parser.add_argument("--pos_spread_threshold", type=float, default=0.5,
+                        help="Voronoi merging: below this spread in position a cell can be merged, in units of the initial spatial cell edge length (default: 0.5)")
+    parser.add_argument("--abs_mom_spread_threshold", type=float, default=-1.0,
+                        help="Voronoi merging: below this absolute spread in momentum a cell can be merged, in units of m_e*c; disabled for -1 (default)")
+    parser.add_argument("--rel_mom_spread_threshold", type=float, default=-1.0,
+                        help="Voronoi merging: below this spread in momentum relative to the mean momentum a cell can be merged; disabled for -1 (default). Exactly one momentum spread threshold must be enabled.")
+    parser.add_argument("--min_mean_energy", type=float, default=511.0,
+                        help="Voronoi merging: minimum mean kinetic energy in keV of a Voronoi cell needed to merge it (default: 511.0)")
     parser.add_argument("--no_plot", action="store_true",
                         help="If set, the phase space plot will not be created.")
     parser.add_argument("--no_csv", action="store_true",
@@ -63,6 +73,16 @@ def main():
             momentum_bins=tuple(args.momentum_bins),
             momentum_coordinates=args.momentum_coordinates,
             log_scale=args.log_scale,
+        ).finalize()
+    elif args.algorithm == "voronoi":
+        # Merged macroparticles have non-uniform weights, so no set_weights_to(1).
+        df_thin = resampler.voronoi_merging(
+            spatial_bins=tuple(args.spatial_bins),
+            min_particles_to_merge=args.min_particles_to_merge,
+            pos_spread_threshold=args.pos_spread_threshold,
+            abs_mom_spread_threshold=args.abs_mom_spread_threshold,
+            rel_mom_spread_threshold=args.rel_mom_spread_threshold,
+            min_mean_energy_kev=args.min_mean_energy,
         ).finalize()
     else:
         df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
