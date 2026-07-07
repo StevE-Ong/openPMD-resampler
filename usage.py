@@ -8,6 +8,7 @@ from pathlib import Path
 from openpmd_resampler.df_to_txt import DataFrameToFile
 from openpmd_resampler.reader import ParticleDataReader
 from openpmd_resampler.resampling import ParticleResampler
+from openpmd_resampler.units import constants
 from openpmd_resampler.visualize_phase_space import PhaseSpaceVisualizer
 
 
@@ -48,7 +49,8 @@ def main():
     parser.add_argument("--no_plot", action="store_true",
                         help="If set, the phase space plot will not be created.")
     parser.add_argument("--fortran_binary", action="store_true",
-                        help="If set, write output as a Fortran unformatted binary file instead of CSV.")
+                        help="If set, write output as a Fortran unformatted binary file instead of CSV,"
+                             " with momenta as normalized momentum u = p/(m*c) instead of MeV/c.")
     parser.add_argument("--no_csv", action="store_true",
                         help="If set, the resulting dataframe will not be saved to file.")
 
@@ -85,9 +87,11 @@ def main():
     
     # Write the reduced dataframe to a file
     suffix = ".dat"
-    DataFrameToFile(df_thin).exclude_energy().write_to_file(
-        opmd_path.with_suffix(suffix), fortran_binary=fortran_binary
-    )
+    writer = DataFrameToFile(df_thin).exclude_energy()
+    if fortran_binary:
+        # Fortran consumers expect normalized momentum u = p/(m*c).
+        writer.momentum_in_mc(particle_species_mass * constants.electron_mass_mev_c2)
+    writer.write_to_file(opmd_path.with_suffix(suffix), fortran_binary=fortran_binary)
 
     # Visualize both dataframes in order to see effects of thining
     phase_space = PhaseSpaceVisualizer(df, label="PIC data")

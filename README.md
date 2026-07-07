@@ -82,7 +82,7 @@ The Voronoi merging accepts the following options, mirroring the PIConGPU plugin
 For example:
 
 ```console
-$ pixi run start --opmd_path <path_to_your_openPMD_file> --species <particle_species_name> --mass <particle mass> --algorithm voronoi --rel_mom_spread_threshold 0.05 --spatial_bins 32 32 32
+$ pixi run start --opmd_path <path_to_your_openPMD_file> --species <particle_species_name> --mass <particle mass> --algorithm voronoi --rel_mom_spread_threshold 0.1 --spatial_bins 128 128 1024 --min_particles_to_merge 10
 ```
 
 Unlike thinning, the merging algorithms do not set the reduction factor directly: coarser binning
@@ -104,6 +104,8 @@ position_x_um (μm), position_y_um (μm), position_z_um (μm), momentum_x_mev_c 
 1.1201412540356980e+01,8.0062201241442832e-01,3.9551004545608885e+03,-9.1752357482910156e+00,-1.4616233825683594e+01,2.9899465942382812e+02
 ...
 ```
+
+With `--fortran_binary`, the output is instead a Fortran unformatted (sequential, record-based) binary file with the records `n (int32), x, y, z, ux, uy, uz, w (float32 arrays)`, where the momenta are written as normalized momentum u = p/(m·c) (dimensionless, openPMD-viewer's `ux` convention) rather than MeV/c.
 
 ## :wrench: Development
 
