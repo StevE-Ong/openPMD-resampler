@@ -112,7 +112,7 @@ position_x_um (μm), position_y_um (μm), position_z_um (μm), momentum_x_mev_c 
 ...
 ```
 
-With `--fortran_binary`, the output is instead a Fortran unformatted (sequential, record-based) binary file with the records `n (int32), x, y, z, ux, uy, uz, w (float32 arrays)`, where the momenta are written as normalized momentum u = p/(m·c) (dimensionless, openPMD-viewer's `ux` convention) rather than MeV/c.
+With `--fortran_unformatted`, the output is instead a Fortran unformatted (sequential, record-based) binary file with the records `n (int32), x, y, z, ux, uy, uz, w (float32 arrays)`, where the momenta are written as normalized momentum u = p/(m·c) (dimensionless, openPMD-viewer's `ux` convention) rather than MeV/c.
 
 ## :wrench: Development
 

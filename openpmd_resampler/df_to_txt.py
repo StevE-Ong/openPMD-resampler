@@ -53,7 +53,7 @@ class DataFrameToFile:
         self.momentum_divisor = mass_mev_c2
         return self
 
-    def write_to_file(self, file_path, fortran_binary=False):
+    def write_to_file(self, file_path, fortran_unformatted=False):
         columns_to_write = self.df.columns.tolist()
         if not self.include_weights:
             columns_to_write.remove("weights")
@@ -61,7 +61,7 @@ class DataFrameToFile:
             columns_to_write.remove("kinetic_energy_mev")
 
         logger.info("Writing dataframe to file. This may take a while...\n")
-        if fortran_binary:
+        if fortran_unformatted:
             self._write_fortran_unformatted(file_path, columns_to_write)
         else:
             self._write_csv(file_path, columns_to_write)

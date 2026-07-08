@@ -53,7 +53,7 @@ def main():
                         help="If set, the phase space plot will not be created.")
     parser.add_argument("--no_csv", action="store_true",
                         help="If set, the resulting dataframe will not be saved to file.")
-    parser.add_argument("--fortran_binary", action="store_true",
+    parser.add_argument("--fortran_unformatted", action="store_true",
                         help="If set, write output as a Fortran unformatted binary file instead of CSV,"
                              " with momenta as normalized momentum u = p/(m*c) instead of MeV/c.")
 
@@ -64,7 +64,7 @@ def main():
     reduction_factor = args.reduction_factor
     no_plot = args.no_plot
     no_csv = args.no_csv
-    fortran_binary = args.fortran_binary
+    fortran_unformatted = args.fortran_unformatted
 
     # Create the dataframe
     df = ParticleDataReader.from_file(opmd_path, particle_species_name=particle_species_name,particle_species_mass=particle_species_mass)
@@ -101,10 +101,10 @@ def main():
     if not no_csv:
         suffix = ".dat"
         writer = DataFrameToFile(df_thin).exclude_energy()
-        if fortran_binary:
+        if fortran_unformatted:
             # Fortran consumers expect normalized momentum u = p/(m*c).
             writer.momentum_in_mc(particle_species_mass * constants.electron_mass_mev_c2)
-        writer.write_to_file(opmd_path.with_suffix(suffix), fortran_binary=fortran_binary)
+        writer.write_to_file(opmd_path.with_suffix(suffix), fortran_unformatted=fortran_unformatted)
 
 
 if __name__ == "__main__":
