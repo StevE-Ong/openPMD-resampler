@@ -19,4 +19,35 @@ openpmd-api = "0.15.*"
 pandas = "2.0.*"
 datashader = "0.15.*"
 matplotlib = "3.7.*"
+scipy = ">=1.10"
+# dask.dataframe (pulled in by datashader) imports pyarrow at runtime but the
+# conda metadata does not declare it.
+pyarrow = "*"
 
+# The default environment gets the CPU build of PyTorch (no CUDA system
+# requirement, so the solver cannot pick a CUDA build); the cuda environment
+# below upgrades it to the GPU build.
+[target.linux-64.dependencies]
+pytorch = "2.*"
+
+# GPU support is opt-in: `pixi run -e cuda start ...` on a machine with an
+# NVIDIA driver. Only this environment requires CUDA.
+[feature.cuda]
+platforms = ["linux-64"]
+
+[feature.cuda.system-requirements]
+cuda = "12"
+
+[feature.cuda.target.linux-64.dependencies]
+pytorch-gpu = "2.*"
+
+[feature.test.dependencies]
+pytest = ">=7"
+
+[feature.test.tasks]
+test = "python -m pytest tests"
+
+[environments]
+cuda = ["cuda"]
+test = ["test"]
+test-cuda = ["test", "cuda"]

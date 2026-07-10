@@ -1,19 +1,30 @@
 """
 This module contains various particle resampling strategies for particle in cell data.
 """
+from typing import Tuple
+
 import numpy as np
 import pandas as pd
 
 from .log import logger
+from .units import constants
 from .utils import dataset_info
 from .reader import DataFrameUpdater
+from .vranic import VranicMerger
+from .voronoi import VoronoiMerger
 
 
 class ParticleResampler:
-    def __init__(self, df: pd.DataFrame, weight_column: str = "weights"):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        weight_column: str = "weights",
+        particle_species_mass: float = 1.0,
+    ):
         self._df = df.copy()
         self.weight_column = weight_column
-        self.updater = DataFrameUpdater(self)
+        self.particle_species_mass = particle_species_mass
+        self.updater = DataFrameUpdater(self, particle_species_mass)
 
     @property
     def df(self):
@@ -96,6 +107,104 @@ class ParticleResampler:
         )
 
         logger.info("Dataset after thinning.\n")
+        dataset_info(self.df)
+
+        return self
+
+    def vranic_merging(
+        self,
+        spatial_bins: Tuple[int, int, int] = (16, 16, 16),
+        momentum_bins: Tuple[int, int, int] = (16, 16, 16),
+        momentum_coordinates: str = "spherical",
+        min_packet_size: int = 4,
+        max_packet_size: int = 4,
+        log_scale: bool = False,
+        device: str = None,
+    ) -> pd.DataFrame:
+        """
+        Merge macroparticles using the algorithm of Vranic et al.,
+        Comput. Phys. Commun. 191 (2015) 65-73.
+
+        Particles are binned into spatial cells and momentum cells, and each
+        packet of at least min_packet_size particles sharing a cell is replaced
+        by two macroparticles conserving total weight, momentum and energy.
+        Coarser binning merges more aggressively.
+
+        The particle mass is taken from the particle_species_mass given to the
+        constructor (relative to the electron mass, 0.0 for photons).
+
+        The merge runs on PyTorch tensors; device selects where ("cuda",
+        "cuda:1", "cpu", ...). The default uses the GPU when one is available
+        (NVIDIA CUDA and AMD ROCm builds both expose it as "cuda").
+        """
+        merger = VranicMerger(
+            self.df,
+            mass_mev_c2=self.particle_species_mass * constants.electron_mass_mev_c2,
+            weight_column=self.weight_column,
+        )
+        self.df = merger.merge(
+            spatial_bins=spatial_bins,
+            momentum_bins=momentum_bins,
+            momentum_coordinates=momentum_coordinates,
+            min_packet_size=min_packet_size,
+            max_packet_size=max_packet_size,
+            log_scale=log_scale,
+            device=device,
+        )
+
+        logger.info("Dataset after Vranic merging.\n")
+        dataset_info(self.df)
+
+        return self
+
+    def voronoi_merging(
+        self,
+        spatial_bins: Tuple[int, int, int] = (16, 16, 16),
+        min_particles_to_merge: int = 8,
+        pos_spread_threshold: float = 0.5,
+        abs_mom_spread_threshold: float = -1.0,
+        rel_mom_spread_threshold: float = -1.0,
+        min_mean_energy_kev: float = 511.0,
+        device: str = None,
+    ) -> pd.DataFrame:
+        """
+        Merge macroparticles using the Voronoi algorithm of Luu, Tueckmantel
+        and Pukhov, Comput. Phys. Commun. 202 (2016) 165-174, as implemented
+        in the particleMerging plugin of PIConGPU.
+
+        Particles are grouped into spatial cells that are subdivided
+        recursively, first in position and then in momentum space, until the
+        spread of every cluster falls below the given thresholds; each cluster
+        of at least min_particles_to_merge particles is then replaced by a
+        single macroparticle, conserving total weight and momentum exactly and
+        energy up to the momentum spread threshold. Exactly one of
+        abs_mom_spread_threshold (in m_e*c) and rel_mom_spread_threshold must
+        be positive; pos_spread_threshold is in units of the initial spatial
+        cell edge length and min_mean_energy_kev in keV.
+
+        The particle mass is taken from the particle_species_mass given to the
+        constructor (relative to the electron mass, 0.0 for photons).
+
+        The merge runs on PyTorch tensors; device selects where ("cuda",
+        "cuda:1", "cpu", ...). The default uses the GPU when one is available
+        (NVIDIA CUDA and AMD ROCm builds both expose it as "cuda").
+        """
+        merger = VoronoiMerger(
+            self.df,
+            mass_mev_c2=self.particle_species_mass * constants.electron_mass_mev_c2,
+            weight_column=self.weight_column,
+        )
+        self.df = merger.merge(
+            spatial_bins=spatial_bins,
+            min_particles_to_merge=min_particles_to_merge,
+            pos_spread_threshold=pos_spread_threshold,
+            abs_mom_spread_threshold=abs_mom_spread_threshold,
+            rel_mom_spread_threshold=rel_mom_spread_threshold,
+            min_mean_energy_kev=min_mean_energy_kev,
+            device=device,
+        )
+
+        logger.info("Dataset after Voronoi merging.\n")
         dataset_info(self.df)
 
         return self

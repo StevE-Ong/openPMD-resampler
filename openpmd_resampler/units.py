@@ -9,16 +9,16 @@ import scipy.constants as const
 
 
 class Units(Enum):
-    POSITION = "μm"
+    POSITION = "m"
     MOMENTUM = "MeV/c"
     WEIGHTS = "1"
     ENERGY = "MeV"
 
 
 units = {
-    "position_x_um": Units.POSITION.value,
-    "position_y_um": Units.POSITION.value,
-    "position_z_um": Units.POSITION.value,
+    "position_x_m": Units.POSITION.value,
+    "position_y_m": Units.POSITION.value,
+    "position_z_m": Units.POSITION.value,
     "momentum_x_mev_c": Units.MOMENTUM.value,
     "momentum_y_mev_c": Units.MOMENTUM.value,
     "momentum_z_mev_c": Units.MOMENTUM.value,
@@ -52,7 +52,6 @@ class Constants:
     electron_mass_kg: float = const.m_e
     electron_charge_picocoulombs: float = const.elementary_charge * 1e12
 
-    meters_to_microns: float = 1e6
     ev_to_mev: float = 1e6
     joule_to_ev: float = const.electron_volt
 
@@ -81,7 +80,7 @@ constants = Constants()
 @dataclass(frozen=True)
 class ConversionFactors:
     momentum: float = constants.momentum_mev_c
-    position: float = constants.meters_to_microns
+    position: float = 1.0
 
 
 conversion_factors = ConversionFactors()

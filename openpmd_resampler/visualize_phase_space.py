@@ -25,8 +25,8 @@ from .utils import combine_images, unique_filename
 class MultiplePanelPlotter(ABC):
     layout = None
     weight_col = "weights"
-    position_features = ("position_x_um", "position_y_um", "position_z_um")
-    position_labels = (r"$x$ ($\mu$m)", r"$y$ ($\mu$m)", r"$z$ ($\mu$m)")
+    position_features = ("position_x_m", "position_y_m", "position_z_m")
+    position_labels = (r"$x$ (m)", r"$y$ (m)", r"$z$ (m)")
     momentum_features = ("momentum_x_mev_c", "momentum_y_mev_c", "momentum_z_mev_c")
     momentum_labels = (
         r"$p_{\mathrm{x}}$ (MeV/c)",
