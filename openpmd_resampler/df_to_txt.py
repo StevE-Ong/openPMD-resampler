@@ -82,21 +82,26 @@ class DataFrameToFile:
             return "m*c"
         return self.units[column]
 
-    def _write_csv(self, file_path, columns_to_write):
+    def _write_csv(self, file_path, columns_to_write, chunk_size=5_000_000):
         with open(file_path, "w", encoding="utf-8") as f:
             header = ", ".join(
                 f"{column} ({self._column_unit(column)})" for column in columns_to_write
             )
             f.write(header + "\n")
-        df = pd.DataFrame({column: self._column_data(column) for column in columns_to_write})
-        df.to_csv(
-            file_path,
-            index=False,
-            header=False,
-            sep=",",
-            float_format="%.7e",
-            mode="a",
-        )
+
+            for start in range(0, len(self.df), chunk_size):
+                chunk = self.df.iloc[start : start + chunk_size][columns_to_write].copy()
+                if self.momentum_divisor is not None:
+                    for column in MOMENTUM_COLUMNS:
+                        if column in chunk.columns:
+                            chunk[column] = chunk[column] / self.momentum_divisor
+                chunk.to_csv(
+                    f,
+                    index=False,
+                    header=False,
+                    sep=",",
+                    float_format="%.7e",
+                )
 
     def _write_fortran_unformatted(self, file_path, columns_to_write):
         import numpy as np

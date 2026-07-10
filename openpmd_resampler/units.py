@@ -52,7 +52,6 @@ class Constants:
     electron_mass_kg: float = const.m_e
     electron_charge_picocoulombs: float = const.elementary_charge * 1e12
 
-    meters_to_microns: float = 1e6
     ev_to_mev: float = 1e6
     joule_to_ev: float = const.electron_volt
 

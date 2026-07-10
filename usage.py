@@ -103,7 +103,7 @@ def main():
     phase_space_thin = PhaseSpaceVisualizer(df_thin, label="Resampled data")
     comparative_phase_space = phase_space + phase_space_thin
 
-    comparative_phase_space.create_plot().savefig(f"{opmd_path.parent}/comparative_phase_space.png")
+    comparative_phase_space.create_plot().savefig(f"{opmd_path.parent}/comparative_phase_space_{args.algorithm}.png")
 
 
 if __name__ == "__main__":

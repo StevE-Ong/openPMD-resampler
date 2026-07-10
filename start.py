@@ -92,7 +92,7 @@ def main():
             device=args.device,
         ).finalize()
     else:
-        df_thin = resampler.global_leveling_thinning(k=reduction_factor).set_weights_to(1).finalize()
+        df_thin = resampler.global_leveling_thinning(k=reduction_factor).finalize()
 
     if not no_plot:
         phase_space_thin = PhaseSpaceVisualizer(df_thin, label="Resampled data")
