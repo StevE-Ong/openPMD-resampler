@@ -158,6 +158,83 @@ def test_global_leveling_thinning_conserves_weight_statistically(beam):
 
 
 @pytest.mark.parametrize("device", devices())
+def test_kernel_upsampling_conserves_weight_and_momentum(beam, device):
+    n = 8
+    before = totals(beam)
+    df_up = (
+        ParticleResampler(beam, particle_species_mass=1.0)
+        .kernel_upsampling(
+            upsampling_factor=n,
+            spatial_bins=(4, 4, 4),
+            position_bandwidth=0.1,
+            momentum_bandwidth=0.1,
+            device=device,
+        )
+        .finalize()
+    )
+    after = totals(df_up)
+
+    # Each parent becomes exactly n daughters of weight w/n.
+    assert len(df_up) == n * len(beam)
+    assert after["weight"] == pytest.approx(before["weight"], rel=1e-6)
+    # Antithetic pairs make the per-parent momentum sum exact up to float32
+    # rounding; compare each component against the total momentum scale.
+    momentum_scale = np.linalg.norm(before["momentum"])
+    assert np.abs(after["momentum"] - before["momentum"]).max() < 1e-5 * momentum_scale
+    # Energy is conserved only to second order in the bandwidth; the error is
+    # positive by convexity of E(p) and small at bandwidth 0.1.
+    assert after["energy"] == pytest.approx(before["energy"], rel=1e-3)
+    assert list(df_up.columns) == list(beam.columns)
+    assert (df_up.dtypes == np.float32).all()
+
+
+@pytest.mark.parametrize("device", devices())
+def test_kernel_upsampling_energy_error_shrinks_with_bandwidth(beam, device):
+    before = totals(beam)
+
+    def energy_error(momentum_bandwidth):
+        df_up = (
+            ParticleResampler(beam, particle_species_mass=1.0)
+            .kernel_upsampling(
+                upsampling_factor=8,
+                spatial_bins=(4, 4, 4),
+                position_bandwidth=0.1,
+                momentum_bandwidth=momentum_bandwidth,
+                device=device,
+            )
+            .finalize()
+        )
+        return abs(totals(df_up)["energy"] - before["energy"]) / before["energy"]
+
+    # The energy error is second order in the momentum bandwidth, so a tenfold
+    # smaller bandwidth gives a strictly smaller error.
+    assert energy_error(0.01) < energy_error(0.1)
+
+
+@pytest.mark.parametrize("device", devices())
+def test_kernel_upsampling_zero_bandwidth_reproduces_parents(beam, device):
+    before = totals(beam)
+    df_up = (
+        ParticleResampler(beam, particle_species_mass=1.0)
+        .kernel_upsampling(
+            upsampling_factor=8,
+            spatial_bins=(4, 4, 4),
+            position_bandwidth=0.0,
+            momentum_bandwidth=0.0,
+            device=device,
+        )
+        .finalize()
+    )
+    after = totals(df_up)
+
+    # With no perturbation the daughters coincide with their parents, so every
+    # total is conserved to float32 tolerance, energy included.
+    assert len(df_up) == 8 * len(beam)
+    assert after["weight"] == pytest.approx(before["weight"], rel=1e-6)
+    assert after["energy"] == pytest.approx(before["energy"], rel=1e-6)
+
+
+@pytest.mark.parametrize("device", devices())
 def test_vranic_merging_is_reproducible_on_cpu(beam, device):
     if device != "cpu":
         pytest.skip("GPU float atomics are not bit-reproducible by design")
