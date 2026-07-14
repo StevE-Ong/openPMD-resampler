@@ -55,8 +55,16 @@ def _uniform_histogram(
             if weights is None:
                 counts += torch.bincount(indices, minlength=number_of_intervals)
             else:
+                # counts is float32; the weights column may be float64, and
+                # index_add_ requires the source to match the destination dtype.
                 counts.index_add_(
-                    0, indices, torch.tensor(weights[start : start + chunk], device="cuda")
+                    0,
+                    indices,
+                    torch.tensor(
+                        weights[start : start + chunk],
+                        dtype=torch.float32,
+                        device="cuda",
+                    ),
                 )
         bin_edges = np.linspace(low, high, number_of_intervals + 1)
         if log_bins:
