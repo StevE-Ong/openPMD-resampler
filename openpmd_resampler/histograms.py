@@ -34,6 +34,8 @@ def _uniform_histogram(
         # still histogram there.
         low, high = float(values.min()), float(values.max())
         if log_bins:
+            if low <= 0.0:
+                raise ValueError("log_bins requires strictly positive values.")
             low, high = float(np.log10(low)), float(np.log10(high))
         if high == low:  # like np.histogram_bin_edges for constant data
             low, high = low - 0.5, high + 0.5
@@ -72,6 +74,8 @@ def _uniform_histogram(
         return bin_edges, counts.cpu().numpy()
 
     if log_bins:
+        if values.min() <= 0.0:
+            raise ValueError("log_bins requires strictly positive values.")
         bin_edges = np.logspace(
             np.log10(values.min()), np.log10(values.max()), num=number_of_intervals + 1
         )

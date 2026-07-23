@@ -117,9 +117,13 @@ class KernelUpsampler:
         del momentum64
 
         # Per spatial cell weighted standard deviation of every phase-space
-        # coordinate, computed once on the full dataset. Sum(w), Sum(w*x) and
-        # Sum(w*x^2) are scatter reductions keyed by the spatial cell, and the
-        # weighted variance is E[x^2] - E[x]^2 (a single-particle cell gives 0).
+        # coordinate, computed once on the full dataset, in two passes to
+        # avoid catastrophic cancellation: E[x^2] - E[x]^2 loses precision in
+        # float32 whenever a coordinate's mean dominates its spread (e.g. a
+        # position offset far from the origin), silently rounding the
+        # variance to zero. Instead, the first pass gets the weighted mean
+        # per cell, and the second pass accumulates Sum(w*(x-mean)^2), whose
+        # terms are already O(spread^2) and don't cancel.
         number_of_cells = int(np.prod(spatial_bins))
         phase = torch.tensor(phase_np, device=torch_device)
         weight = torch.tensor(weight_np, device=torch_device)
@@ -132,15 +136,16 @@ class KernelUpsampler:
         zeros = lambda *shape: torch.zeros(*shape, dtype=phase.dtype, device=torch_device)
         cell_weight = zeros(number_of_cells).index_add_(0, cell_key, weight)
         cell_sum = zeros((number_of_cells, 6)).index_add_(0, cell_key, weight[:, None] * phase)
-        cell_sum_sq = zeros((number_of_cells, 6)).index_add_(
-            0, cell_key, weight[:, None] * phase**2
-        )
         tiny = torch.finfo(phase.dtype).tiny
         inverse_weight = 1.0 / cell_weight.clamp_min(tiny)
         mean = cell_sum * inverse_weight[:, None]
-        variance = (cell_sum_sq * inverse_weight[:, None] - mean**2).clamp_min(0.0)
+        centered = phase - mean[cell_key]
+        cell_sum_sq = zeros((number_of_cells, 6)).index_add_(
+            0, cell_key, weight[:, None] * centered**2
+        )
+        variance = (cell_sum_sq * inverse_weight[:, None]).clamp_min(0.0)
         cell_sigma = torch.sqrt(variance)  # (number_of_cells, 6)
-        del cell_weight, cell_sum, cell_sum_sq, mean, variance, phase, weight
+        del cell_weight, cell_sum, cell_sum_sq, mean, centered, variance, phase, weight
 
         # Kernel width per coordinate: the position bandwidth for the three
         # position coordinates, the momentum bandwidth for the three momentum

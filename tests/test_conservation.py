@@ -211,6 +211,66 @@ def test_kernel_upsampling_energy_error_shrinks_with_bandwidth(beam, device):
     assert energy_error(0.01) < energy_error(0.1)
 
 
+def offset_beam(n=200_000, seed=99):
+    """A bunch with coordinates far offset from zero relative to their spread.
+
+    Regression fixture for the weighted-variance catastrophic-cancellation
+    bug found in PR #3 review: computing Var = E[x^2] - E[x]^2 in float32
+    silently collapses to (near) zero once the mean dominates the spread.
+    `position_z_m` (1 cm offset, 1 um spread) and `momentum_z_mev_c` (2 GeV/c
+    offset, spread 10) both have offset:spread ratios the original
+    synthetic `beam` fixture never exercises.
+    """
+    rng = np.random.default_rng(seed)
+    df = pd.DataFrame(
+        {
+            "position_x_m": rng.normal(0.0, 2e-6, n),
+            "position_y_m": rng.normal(0.0, 2e-6, n),
+            "position_z_m": rng.normal(1e-2, 1e-6, n),
+            "momentum_x_mev_c": rng.normal(3.0, 1.0, n),
+            "momentum_y_mev_c": rng.normal(-2.0, 1.0, n),
+            "momentum_z_mev_c": rng.normal(2000.0, 10.0, n),
+            "weights": rng.uniform(0.5, 2.0, n),
+        },
+        dtype=np.float32,
+    )
+    p_squared = (
+        df["momentum_x_mev_c"].astype(np.float64) ** 2
+        + df["momentum_y_mev_c"].astype(np.float64) ** 2
+        + df["momentum_z_mev_c"].astype(np.float64) ** 2
+    )
+    df["kinetic_energy_mev"] = (
+        np.sqrt(p_squared + ELECTRON_MASS**2) - ELECTRON_MASS
+    ).astype(np.float32)
+    return df
+
+
+@pytest.mark.parametrize("device", devices())
+def test_kernel_upsampling_adds_noise_to_offset_coordinates(device):
+    beam = offset_beam()
+    bandwidth = 0.1
+    df_up = (
+        ParticleResampler(beam, particle_species_mass=1.0)
+        .kernel_upsampling(
+            upsampling_factor=8,
+            spatial_bins=(1, 1, 1),  # single cell: local spread == global spread
+            position_bandwidth=bandwidth,
+            momentum_bandwidth=bandwidth,
+            device=device,
+        )
+        .finalize()
+    )
+
+    for column in ("position_z_m", "momentum_z_mev_c"):
+        in_std = beam[column].to_numpy(dtype=np.float64).std()
+        out_std = df_up[column].to_numpy(dtype=np.float64).std()
+        added = np.sqrt(max(out_std**2 - in_std**2, 0.0))
+        # Loose tolerance: this checks the kernel adds noise on the expected
+        # scale (bandwidth * std), not that it collapses to ~0 as it did
+        # under the float32 E[x^2] - E[x]^2 cancellation bug.
+        assert added == pytest.approx(bandwidth * in_std, rel=0.5)
+
+
 @pytest.mark.parametrize("device", devices())
 def test_kernel_upsampling_zero_bandwidth_reproduces_parents(beam, device):
     before = totals(beam)
